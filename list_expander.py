@@ -149,5 +149,8 @@ def main():
     print("ALL CITIES COMPLETED!")
     print(f"{'='*60}")
 
+    from upload import upload_results
+    upload_results()
+
 if __name__ == "__main__":
     main()

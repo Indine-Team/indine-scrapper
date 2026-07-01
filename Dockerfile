@@ -16,6 +16,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY data.json list_expander.py scrapper.py ./
+COPY data.json list_expander.py scrapper.py upload.py ./
 
 CMD ["python", "list_expander.py"]
