@@ -11,6 +11,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException, WebDriverException, InvalidSessionIdException
 from urllib.parse import unquote, urlparse, quote
 import re
+import time
 from urllib.parse import unquote, urlparse
 
 # ──────────────────────────────────────────────────────────────
@@ -18,15 +19,18 @@ from urllib.parse import unquote, urlparse
 # ──────────────────────────────────────────────────────────────
 MENUS_FOLDER = "menus"
 RESTAURANTS_FOLDER = "restaurants"
-RESTART_EVERY = 50
+RESTART_EVERY = 25
 
 # ──────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────
+def checkpoint(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
 def create_menu_folders():
     os.makedirs(MENUS_FOLDER, exist_ok=True)
     print(f"Created menu folder: {MENUS_FOLDER}")
-
+    
 def extract_city_from_url(url):
     """Extract city from URL path: .../cairo/... → 'cairo'"""
     path = urlparse(url).path.strip("/")
@@ -181,23 +185,36 @@ def calculate_estimated_price(menu_items):
     return round(sum(top_prices) / len(top_prices))
 
 def parse_menu(soup, driver):
+    checkpoint("parse_menu(): start")
     items = []
 
     # ── 1. Scroll to load all lazy items ──
-    print("  [DEBUG] Scrolling to load all menu items...")
+    # print("  [DEBUG] Scrolling to load all menu items...")
+    checkpoint("parse_menu(): starting scroll loop")
     last_height = driver.execute_script("return document.body.scrollHeight")
+    scroll_count = 0
     while True:
+        scroll_count += 1
+        checkpoint(f"Scroll #{scroll_count}")
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1.5)
         new_height = driver.execute_script("return document.body.scrollHeight")
+        checkpoint(f"Height: {last_height} -> {new_height}")
         if new_height == last_height:
+            checkpoint("Scroll stabilized")
             break
         last_height = new_height
-    print(f"  [DEBUG] Final page height: {last_height}")
+        if scroll_count >= 30:
+            checkpoint("Max scrolls reached")
+            break
+    # print(f"  [DEBUG] Final page height: {last_height}")
 
     # ── 2. Get fresh soup and live DOM elements after scrolling ──
+    checkpoint("5. Reading page source")
     fresh_html = driver.page_source
+    checkpoint(f"6. Page source size: {len(fresh_html):,} chars")
     soup = BeautifulSoup(fresh_html, "html.parser")
+    checkpoint("7. BeautifulSoup parsed")
     all_item_els = driver.find_elements(By.CSS_SELECTOR, '.menu-item.clickable-item')
     soup_items = soup.select('.menu-item.clickable-item')
     
@@ -213,13 +230,15 @@ def parse_menu(soup, driver):
                 variant_indices.add(i)
         except Exception:
             pass
-    print(f"  [DEBUG] {len(variant_indices)} items have price ranges")
+    # print(f"  [DEBUG] {len(variant_indices)} items have price ranges")
+    checkpoint(f"{len(variant_indices)} items require modal expansion")
 
     # ── 4. Extract size variants by clicking each variant item (modal) ──
     cache = {}
     for idx in variant_indices:
         el = all_item_els[idx]
         try:
+            checkpoint(f"Opening modal for item {idx}")
             driver.execute_script(
                 "arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", el
             )
@@ -235,14 +254,18 @@ def parse_menu(soup, driver):
                     modal = driver.find_element(
                         By.CSS_SELECTOR, '.modal.show, .modal.in, .modal.fade.in'
                     )
+                    checkpoint(f"Modal appeared for item {idx}")
                     modal.find_element(By.CSS_SELECTOR, 'li.size span.cost')
+                    checkpoint(f"Extracted {len(sizes)} variants")
                     break
                 except Exception:
                     modal = None
-
+            
             if not modal:
                 print(f"  [DEBUG] Item {idx}: modal never appeared")
                 continue
+            
+            checkpoint("Modal closed")
 
             sizes = []
             for li in modal.find_elements(By.CSS_SELECTOR, 'li.size'):
@@ -440,13 +463,17 @@ def scrape_menus(input_file):
 
         print(f"\nProcessing {url}")
         try:
+            checkpoint("1. Calling driver.get()")
             driver.get(url)
+            checkpoint("2. driver.get() returned")
 
             # Step 1: wait for page body
             try:
+                checkpoint("3. Waiting for body")
                 WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
                 )
+                checkpoint("4. Body found")
             except TimeoutException:
                 print(f" ⏭️  Skipped: page_did_not_load")
                 skipped_data.append({"url": url, "reason": "page_did_not_load"})
@@ -457,7 +484,9 @@ def scrape_menus(input_file):
             soup = BeautifulSoup(driver.page_source, "html.parser")
 
             # Step 2: early no‑menu check
+            checkpoint("8. Checking no-menu state")
             no_menu, no_menu_reason = has_no_menu(soup)
+            checkpoint("8. Checking no-menu state")
             if no_menu:
                 print(f" ⏭️  Skipped: {no_menu_reason}")
                 skipped_data.append({"url": url, "reason": no_menu_reason})
@@ -467,12 +496,14 @@ def scrape_menus(input_file):
 
             # Step 3: wait for metadata widget
             try:
+                checkpoint("10. Waiting for metadata")
                 WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((
                         By.CSS_SELECTOR,
                         "div.vue-star-rating, div.resturant-name h1"
                     ))
                 )
+                checkpoint("11. Metadata loaded")
             except TimeoutException:
                 print(f" ⏭️  Skipped: missing_metadata")
                 skipped_data.append({"url": url, "reason": "missing_metadata"})
@@ -482,8 +513,10 @@ def scrape_menus(input_file):
 
             soup = BeautifulSoup(driver.page_source, "html.parser")
 
+            checkpoint("12. Validating restaurant")
             # Step 4: validate (rating, reviews, delivery‑only)
             is_valid, reason, metadata = validate_restaurant(soup, url)
+            checkpoint(f"13. Validation finished ({is_valid})")
             if not is_valid:
                 print(f" ⏭️  Skipped: {reason}")
                 skipped_data.append({**metadata, "reason": reason})
@@ -493,9 +526,11 @@ def scrape_menus(input_file):
 
             # Step 5: wait for menu sections
             try:
+                checkpoint("14. Waiting for menu")
                 WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, ".cat-section"))
                 )
+                checkpoint("15. Menu appeared")
             except TimeoutException:
                 print(f" ⏭️  Skipped: menu_not_found")
                 skipped_data.append({**metadata, "reason": "menu_not_found"})
@@ -504,7 +539,9 @@ def scrape_menus(input_file):
                 continue
 
             soup = BeautifulSoup(driver.page_source, "html.parser")
+            checkpoint("16. Entering parse_menu()")
             menu = parse_menu(soup, driver)   # note: parse_menu does not need 'url'
+            checkpoint(f"17. parse_menu() finished ({len(menu)} items)")
             estimated = calculate_estimated_price(menu)
             metadata["url"] = url
 
