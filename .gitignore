@@ -1,4 +1,21 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-restaurants/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs
+.idea/
+.vscode/
+
+# Scoped files and logs
+*.log
+
+# Scraped Output data (optional to ignore, recommended if keeping repo clean)
 menus/
+restaurants/

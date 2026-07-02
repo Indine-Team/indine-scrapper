@@ -1,21 +1,33 @@
-FROM python:3.12-slim
+FROM python:3.10-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget gnupg2 unzip curl \
-    && mkdir -p /etc/apt/keyrings \
-    && wget -q -O /etc/apt/keyrings/google-chrome.asc \
-        https://dl.google.com/linux/linux_signing_key.pub \
-    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.asc] http://dl.google.com/linux/chrome/deb/ stable main" \
-        > /etc/apt/sources.list.d/google-chrome.list \
+# Install system dependencies and Google Chrome
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    gnupg \
+    unzip \
+    --no-install-recommends \
+    && curl -sSL https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends google-chrome-stable \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set display port to prevent crash
+ENV DISPLAY=:99
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+# Copy requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY data.json list_expander.py scrapper.py upload.py ./
+# Copy the source code
+COPY . .
 
+# Ensure directories exist
+RUN mkdir -p menus restaurants
+
+# Run list_expander.py by default
 CMD ["python", "list_expander.py"]

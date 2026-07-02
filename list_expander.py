@@ -33,9 +33,12 @@ def scrape_restaurant_links(start_url):
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--start-maximized")
+    opts.page_load_strategy = 'eager'
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+    driver.set_page_load_timeout(45)
     
     area = extract_area_from_url(start_url)
     print(f"Opening list page for area: {area}")
@@ -148,9 +151,6 @@ def main():
     print(f"\n{'='*60}")
     print("ALL CITIES COMPLETED!")
     print(f"{'='*60}")
-
-    from upload import upload_results
-    upload_results()
 
 if __name__ == "__main__":
     main()
