@@ -37,7 +37,7 @@ def scrape_restaurant_links(start_url):
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+    driver = webdriver.Chrome(options=opts)
     driver.set_page_load_timeout(45)
     
     area = extract_area_from_url(start_url)
