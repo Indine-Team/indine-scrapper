@@ -35,6 +35,15 @@ def scrape_restaurant_links(start_url):
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
+    
+    # ─── OPTIMIZATION & LOG SUPPRESSION MODIFICATIONS ───
+    opts.add_argument("--log-level=3")             # Suppresses all internal chrome warnings/info logs
+    opts.add_argument("--disable-remote-fonts")     # Blocks the renderer from downloading heavy web fonts
+    opts.add_argument("--blink-settings=imagesEnabled=false") # Explicitly stops blink engine from loading images
+    
+    # Optional: Aggressive feature disabling to reduce background network noise
+    opts.add_argument("--disable-features=Translate,OptimizationHints,DialMediaRouteProvider")
+
     driver = webdriver.Chrome(options=opts)
     driver.set_page_load_timeout(45)
     

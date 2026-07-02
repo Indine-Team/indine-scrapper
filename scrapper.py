@@ -61,7 +61,7 @@ def final_price(txt: str) -> int:
     return int(min(numeric_values))
         
 def make_driver():
-    """Create a fresh headless Chrome driver with sane defaults."""
+    """Create a fresh headless Chrome driver optimized for speed and memory hygiene."""
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--start-maximized")
@@ -73,9 +73,15 @@ def make_driver():
     opts.add_argument("--disable-background-networking")
     opts.add_argument("--disable-background-timer-throttling")
     opts.add_argument("--disable-renderer-backgrounding")
-    # Cap the JS heap so a single tab can't balloon and take the whole
-    # process (and the droplet) down with it.
-    opts.add_argument("--js-flags=--max-old-space-size=256")
+    
+    # ─── OPTIMIZATION & LOG SUPPRESSION MODIFICATIONS ───
+    opts.add_argument("--log-level=3")             # Fixes DEPRECATED_ENDPOINT and GPU adapter log pollution
+    opts.add_argument("--disable-remote-fonts")     # Prevents processing external layout fonts
+    opts.add_argument("--blink-settings=imagesEnabled=false") # Blocks images from loading/rendering entirely
+    
+    # Cap the JS heap so a single tab can't balloon and take the whole process down
+    opts.add_argument("--js-flags=--max-old-space-size=512")
+    
     driver = webdriver.Chrome(options=opts)
     driver.set_page_load_timeout(45)
     return driver
@@ -330,7 +336,6 @@ def validate_restaurant(soup, url):
     address = extract_location(soup)
     city = extract_city_from_url(url)
 
-    # Build query_string: "restaurantName area city" (trim if some missing)
     parts = [name, area, city]
     query_string = " ".join(p for p in parts if p)
 
@@ -346,8 +351,11 @@ def validate_restaurant(soup, url):
 
     if is_delivery_only_page(soup):
         return False, "delivery_only", metadata
-    if rating_value < 2.0:
+        
+    # ─── FIXED: Guard check added to prevent NoneType < float error ───
+    if rating_value is not None and rating_value < 2.0:
         return False, "rating_below_2", metadata
+        
     if ratings_count < 100:
         return False, "insufficient_reviews", metadata
 
@@ -364,7 +372,7 @@ def scrape_menus(input_file):
         city = base[:-len("_restaurants.json")]
     if not city:
         city = "unknown_city"
- 
+
     # ---- load restaurant list (city file is a JSON array of URLs) ----
     raw = json.load(open(input_file, encoding="utf-8"))
     # Convert to list of dicts if they are plain strings
@@ -372,28 +380,53 @@ def scrape_menus(input_file):
         restaurants = [{"name": None, "url": u} for u in raw]
     else:
         restaurants = raw
- 
+
     if not restaurants:
         print(f"No restaurants to process in {input_file}")
         return
- 
+
     # sanity check: city can also be extracted from the first URL
     if city == "unknown_city":
         city = extract_city_from_url(restaurants[0]["url"]) or "unknown_city"
- 
+
     print(f"Scraping menus for city: {city} (total restaurants: {len(restaurants)})")
- 
+
+    # ── NEW: Load already scraped URLs from the city's menus file ──
+    city_menus_file = os.path.join(MENUS_FOLDER, f"{city}_menus.json")
+    existing_menus = []
+    existing_urls = set()
+    if os.path.exists(city_menus_file):
+        try:
+            with open(city_menus_file, "r", encoding="utf-8") as f:
+                existing_menus = json.load(f)
+            existing_urls = {item.get("url") for item in existing_menus if "url" in item}
+            print(f"Loaded {len(existing_urls)} already scraped query strings from {city_menus_file}")
+        except Exception:
+            print("Warning: could not read existing menus file, treating as empty.")
+    else:
+        print(f"No existing menus file found for {city}, all URLs will be scraped.")
+    # ── end new block ──
+
     driver = make_driver()
     processed_since_restart = 0
     committed_data = []
     skipped_data = []
- 
+
     # ---- process every restaurant in the list ----
     idx = 0
     while idx < len(restaurants):
         r = restaurants[idx]
         url = r["url"]
- 
+
+        # ── NEW: skip if already scraped ──
+        if url in existing_urls:
+            print(f" ⏭️  Already scraped: {url}")
+            skipped_data.append({"url": url, "reason": "already_scraped"})
+            idx += 1
+            processed_since_restart += 1
+            continue
+        # ── end skip ──
+
         # Periodic proactive restart — cheaper than waiting for a crash.
         if processed_since_restart >= RESTART_EVERY:
             print(f"  ↻ Restarting driver after {RESTART_EVERY} restaurants "
@@ -404,11 +437,11 @@ def scrape_menus(input_file):
                 pass
             driver = make_driver()
             processed_since_restart = 0
- 
+
         print(f"\nProcessing {url}")
         try:
             driver.get(url)
- 
+
             # Step 1: wait for page body
             try:
                 WebDriverWait(driver, 10).until(
@@ -420,9 +453,9 @@ def scrape_menus(input_file):
                 idx += 1
                 processed_since_restart += 1
                 continue
- 
+
             soup = BeautifulSoup(driver.page_source, "html.parser")
- 
+
             # Step 2: early no‑menu check
             no_menu, no_menu_reason = has_no_menu(soup)
             if no_menu:
@@ -431,7 +464,7 @@ def scrape_menus(input_file):
                 idx += 1
                 processed_since_restart += 1
                 continue
- 
+
             # Step 3: wait for metadata widget
             try:
                 WebDriverWait(driver, 10).until(
@@ -446,9 +479,9 @@ def scrape_menus(input_file):
                 idx += 1
                 processed_since_restart += 1
                 continue
- 
+
             soup = BeautifulSoup(driver.page_source, "html.parser")
- 
+
             # Step 4: validate (rating, reviews, delivery‑only)
             is_valid, reason, metadata = validate_restaurant(soup, url)
             if not is_valid:
@@ -457,7 +490,7 @@ def scrape_menus(input_file):
                 idx += 1
                 processed_since_restart += 1
                 continue
- 
+
             # Step 5: wait for menu sections
             try:
                 WebDriverWait(driver, 10).until(
@@ -469,32 +502,50 @@ def scrape_menus(input_file):
                 idx += 1
                 processed_since_restart += 1
                 continue
- 
+
             soup = BeautifulSoup(driver.page_source, "html.parser")
-            menu = parse_menu(soup, driver, url)
+            menu = parse_menu(soup, driver)   # note: parse_menu does not need 'url'
             estimated = calculate_estimated_price(menu)
- 
-            committed_data.append({
+            metadata["url"] = url
+
+            new_scraped_item = {
                 **metadata,
                 "estimatedPrice": estimated,
                 "menu": menu
-            })
+            }
+
+            committed_data.append(new_scraped_item)
             print(f" ✅ Committed with {len(menu)} menu items")
+
+            # ─── MODIFICATION: PERSIST TO DISK IMMEDIATELY ───
+            current_file_menus = []
+            if os.path.exists(city_menus_file):
+                try:
+                    with open(city_menus_file, "r", encoding="utf-8") as f:
+                        current_file_menus = json.load(f)
+                except Exception:
+                    current_file_menus = []
+
+            current_file_menus.append(new_scraped_item)
+            
+            with open(city_menus_file, "w", encoding="utf-8") as f:
+                json.dump(current_file_menus, f, ensure_ascii=False, indent=2)
+            print(f" 💾 Real-time save completed for: {metadata['restaurant']}")
+
+            # Dynamically update existing_urls so the script registers it as done
+            existing_urls.add(metadata.get("url"))
+
             time.sleep(1)
- 
             idx += 1
             processed_since_restart += 1
- 
+
         except (WebDriverException, InvalidSessionIdException) as crash_err:
-            # This is the "tab crashed" / renderer-died / session-invalid
-            # bucket. Rebuild the driver and retry the SAME url once
-            # instead of losing every remaining restaurant in the list.
             print(f" 💥 Driver/tab crashed on {url}: {crash_err}")
             try:
                 driver.quit()
             except Exception:
                 pass
- 
+
             retry_count = r.get("_retry_count", 0)
             if retry_count >= 1:
                 print(f" ⏭️  Skipped after crash retry: {url}")
@@ -505,10 +556,10 @@ def scrape_menus(input_file):
                 print(f"  ↻ Rebuilding driver and retrying this URL once")
                 r["_retry_count"] = retry_count + 1
                 # do NOT advance idx — retry the same restaurant
- 
+
             driver = make_driver()
             processed_since_restart = 0
- 
+
         except TimeoutException as te:
             print(f" ⏭️  Skipped: timeout ({te})")
             skipped_data.append({"url": url, "reason": "timeout", "error": str(te)})
@@ -519,12 +570,12 @@ def scrape_menus(input_file):
             skipped_data.append({"url": url, "reason": "exception", "error": str(e)})
             idx += 1
             processed_since_restart += 1
- 
+
     try:
         driver.quit()
     except Exception:
         pass
- 
+
     google_maps_links = []
     # collect from committed (all entries that have query_string)
     for item in committed_data:
@@ -532,36 +583,30 @@ def scrape_menus(input_file):
         if qs:
             link = f"https://www.google.com/maps/search/{quote(qs)}?hl=en"
             google_maps_links.append(link)
- 
+
     # remove duplicates while preserving order
     unique_links = list(dict.fromkeys(google_maps_links))
- 
+
     gmaps_filename = f"{city}_restaurants_googleMaps.txt"
     gmaps_path = os.path.join(RESTAURANTS_FOLDER, gmaps_filename)
     with open(gmaps_path, "w", encoding="utf-8") as f:
         f.write("\n".join(unique_links))
- 
+
     if unique_links:
+        mode = "a" if os.path.exists(gmaps_path) else "w"
+        with open(gmaps_path, mode, encoding="utf-8") as f:
+            if mode == "a":
+                f.write("\n" + "\n".join(unique_links))
+            else:
+                f.write("\n".join(unique_links))
         print(f"Saved {len(unique_links)} Google Maps links to {gmaps_path}")
-    # ---- Append to city menus file (deduplicate by URL) ----
-    city_menus_file = os.path.join(MENUS_FOLDER, f"{city}_menus.json")
-    existing_menus = []
-    if os.path.exists(city_menus_file):
-        with open(city_menus_file, "r", encoding="utf-8") as f:
-            existing_menus = json.load(f)
-        print(f"Loaded {len(existing_menus)} existing menus from {city_menus_file}")
- 
-    existing_urls = {item.get("url") for item in existing_menus if "url" in item}
-    new_committed = [item for item in committed_data if item.get("url") not in existing_urls]
-    duplicates = len(committed_data) - len(new_committed)
-    print(f"New restaurants to add: {len(new_committed)}, duplicates skipped: {duplicates}")
- 
-    if new_committed:
-        all_menus = existing_menus + new_committed
-        with open(city_menus_file, "w", encoding="utf-8") as f:
-            json.dump(all_menus, f, ensure_ascii=False, indent=2)
-        print(f"✓ Saved {len(all_menus)} total menus to {city_menus_file}")
- 
+
+    # ---- Append new committed data to the city menus file ----
+    all_menus = existing_menus + committed_data
+    with open(city_menus_file, "w", encoding="utf-8") as f:
+        json.dump(all_menus, f, ensure_ascii=False, indent=2)
+    print(f"✓ Saved {len(all_menus)} total menus to {city_menus_file}")
+
     # Save skipped log per city (append)
     city_skipped_file = os.path.join(MENUS_FOLDER, f"{city}_skipped.json")
     existing_skipped = []
@@ -573,7 +618,8 @@ def scrape_menus(input_file):
         json.dump(all_skipped, f, ensure_ascii=False, indent=2)
     if skipped_data:
         print(f"Skipped {len(skipped_data)} restaurants, log saved to {city_skipped_file}")
- 
+        
+    print(f"✓ Run complete. Total menus currently in file: {len(existing_menus) + len(committed_data)}")
     return city_menus_file
 
 # ──────────────────────────────────────────────────────────────
