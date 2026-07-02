@@ -18,7 +18,7 @@ from urllib.parse import unquote, urlparse
 # ──────────────────────────────────────────────────────────────
 MENUS_FOLDER = "menus"
 RESTAURANTS_FOLDER = "restaurants"
-RESTART_EVERY = 25
+RESTART_EVERY = 50
 
 # ──────────────────────────────────────────────────────────────
 # Helpers
