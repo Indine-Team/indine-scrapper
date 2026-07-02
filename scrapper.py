@@ -11,7 +11,6 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException, WebDriverException, InvalidSessionIdException
 from urllib.parse import unquote, urlparse, quote
 import re
-import time
 from urllib.parse import unquote, urlparse
 
 # ──────────────────────────────────────────────────────────────
@@ -19,7 +18,7 @@ from urllib.parse import unquote, urlparse
 # ──────────────────────────────────────────────────────────────
 MENUS_FOLDER = "menus"
 RESTAURANTS_FOLDER = "restaurants"
-RESTART_EVERY = 25
+RESTART_EVERY = 10
 
 # ──────────────────────────────────────────────────────────────
 # Helpers
@@ -30,7 +29,7 @@ def checkpoint(msg):
 def create_menu_folders():
     os.makedirs(MENUS_FOLDER, exist_ok=True)
     print(f"Created menu folder: {MENUS_FOLDER}")
-    
+
 def extract_city_from_url(url):
     """Extract city from URL path: .../cairo/... → 'cairo'"""
     path = urlparse(url).path.strip("/")
@@ -84,11 +83,23 @@ def make_driver():
     opts.add_argument("--blink-settings=imagesEnabled=false") # Blocks images from loading/rendering entirely
     
     # Cap the JS heap so a single tab can't balloon and take the whole process down
-    opts.add_argument("--js-flags=--max-old-space-size=512")
-    
+    opts.add_argument("--js-flags=--max-old-space-size=1024")
+    opts.add_argument("--aggressive-cache-discard")
+    opts.add_argument("--disable-features=V8CodeCache")
+    opts.add_argument("--renderer-process-limit=1")
+    opts.add_argument("--disable-site-isolation-trials")
+
     driver = webdriver.Chrome(options=opts)
     driver.set_page_load_timeout(45)
     return driver
+
+def cleanup_between_pages(driver):
+    """Navigate to blank page and force V8 garbage collection."""
+    try:
+        driver.get("about:blank")
+        driver.execute_cdp_cmd("HeapProfiler.collectGarbage", {})
+    except Exception:
+        pass
 
 # ──────────────────────────────────────────────────────────────
 # Stage 1 — Metadata extractors (used for validation)
@@ -184,12 +195,13 @@ def calculate_estimated_price(menu_items):
         return None
     return round(sum(top_prices) / len(top_prices))
 
-def parse_menu(soup, driver):
+def parse_menu(driver):
     checkpoint("parse_menu(): start")
     items = []
 
+    MAX_MENU_ITEMS = 200
+
     # ── 1. Scroll to load all lazy items ──
-    # print("  [DEBUG] Scrolling to load all menu items...")
     checkpoint("parse_menu(): starting scroll loop")
     last_height = driver.execute_script("return document.body.scrollHeight")
     scroll_count = 0
@@ -207,17 +219,24 @@ def parse_menu(soup, driver):
         if scroll_count >= 30:
             checkpoint("Max scrolls reached")
             break
-    # print(f"  [DEBUG] Final page height: {last_height}")
+        if scroll_count % 5 == 0:
+            item_count = driver.execute_script(
+                "return document.querySelectorAll('.menu-item.clickable-item').length"
+            )
+            if item_count >= MAX_MENU_ITEMS:
+                checkpoint(f"Early scroll stop: {item_count} items loaded")
+                break
 
     # ── 2. Get fresh soup and live DOM elements after scrolling ──
     checkpoint("5. Reading page source")
     fresh_html = driver.page_source
     checkpoint(f"6. Page source size: {len(fresh_html):,} chars")
     soup = BeautifulSoup(fresh_html, "html.parser")
+    del fresh_html
     checkpoint("7. BeautifulSoup parsed")
     all_item_els = driver.find_elements(By.CSS_SELECTOR, '.menu-item.clickable-item')
     soup_items = soup.select('.menu-item.clickable-item')
-    
+
     print(f"  [DEBUG] Live DOM items: {len(all_item_els)}")
     print(f"  [DEBUG] Soup items: {len(soup_items)}")
 
@@ -230,7 +249,6 @@ def parse_menu(soup, driver):
                 variant_indices.add(i)
         except Exception:
             pass
-    # print(f"  [DEBUG] {len(variant_indices)} items have price ranges")
     checkpoint(f"{len(variant_indices)} items require modal expansion")
 
     # ── 4. Extract size variants by clicking each variant item (modal) ──
@@ -256,15 +274,14 @@ def parse_menu(soup, driver):
                     )
                     checkpoint(f"Modal appeared for item {idx}")
                     modal.find_element(By.CSS_SELECTOR, 'li.size span.cost')
-                    checkpoint(f"Extracted {len(sizes)} variants")
                     break
                 except Exception:
                     modal = None
-            
+
             if not modal:
                 print(f"  [DEBUG] Item {idx}: modal never appeared")
                 continue
-            
+
             checkpoint("Modal closed")
 
             sizes = []
@@ -341,6 +358,7 @@ def parse_menu(soup, driver):
                 'categoryName': category_name
             })
 
+    del all_item_els, soup_items, soup, cache
     print(f"  [DEBUG] parse_menu returning {len(items)} items")
     return items
 
@@ -379,7 +397,7 @@ def validate_restaurant(soup, url):
     if rating_value is not None and rating_value < 2.0:
         return False, "rating_below_2", metadata
         
-    if ratings_count < 100:
+    if ratings_count < 4000:
         return False, "insufficient_reviews", metadata
 
     return True, None, metadata
@@ -388,13 +406,13 @@ def validate_restaurant(soup, url):
 # Core scraper
 # ──────────────────────────────────────────────────────────────
 def scrape_menus(input_file):
-    # ---- determine city from filename or first URL ----
-    city = None
-    base = os.path.basename(input_file)   # e.g., "cairo_restaurants.json"
+    # ---- determine city_area key from filename ----
+    city_area = None
+    base = os.path.basename(input_file)   # e.g., "cairo_al-mokatam_restaurants.json"
     if base.endswith("_restaurants.json"):
-        city = base[:-len("_restaurants.json")]
-    if not city:
-        city = "unknown_city"
+        city_area = base[:-len("_restaurants.json")]
+    if not city_area:
+        city_area = "unknown"
 
     # ---- load restaurant list (city file is a JSON array of URLs) ----
     raw = json.load(open(input_file, encoding="utf-8"))
@@ -408,27 +426,30 @@ def scrape_menus(input_file):
         print(f"No restaurants to process in {input_file}")
         return
 
-    # sanity check: city can also be extracted from the first URL
-    if city == "unknown_city":
-        city = extract_city_from_url(restaurants[0]["url"]) or "unknown_city"
+    print(f"Scraping menus for: {city_area} (total restaurants: {len(restaurants)})")
 
-    print(f"Scraping menus for city: {city} (total restaurants: {len(restaurants)})")
-
-    # ── NEW: Load already scraped URLs from the city's menus file ──
-    city_menus_file = os.path.join(MENUS_FOLDER, f"{city}_menus.json")
+    # ── Load already scraped restaurants from the area's menus file ──
+    city_area_menus_file = os.path.join(MENUS_FOLDER, f"{city_area}_menus.json")
     existing_menus = []
     existing_urls = set()
-    if os.path.exists(city_menus_file):
+    existing_names = set()
+    if os.path.exists(city_area_menus_file):
         try:
-            with open(city_menus_file, "r", encoding="utf-8") as f:
+            with open(city_area_menus_file, "r", encoding="utf-8") as f:
                 existing_menus = json.load(f)
             existing_urls = {item.get("url") for item in existing_menus if "url" in item}
-            print(f"Loaded {len(existing_urls)} already scraped query strings from {city_menus_file}")
+            existing_names = {item.get("restaurant") for item in existing_menus if "restaurant" in item}
+            print(f"Loaded {len(existing_names)} already scraped restaurants from {city_area_menus_file}")
         except Exception:
             print("Warning: could not read existing menus file, treating as empty.")
     else:
-        print(f"No existing menus file found for {city}, all URLs will be scraped.")
-    # ── end new block ──
+        print(f"No existing menus file found for {city_area}, all URLs will be scraped.")
+
+    # ── Early exit: skip if all URLs already scraped ──
+    urls_to_scrape = {r["url"] for r in restaurants}
+    if existing_urls and urls_to_scrape.issubset(existing_urls):
+        print(f"  All {len(urls_to_scrape)} restaurants already scraped in {city_area_menus_file}. Skipping.")
+        return city_area_menus_file
 
     driver = make_driver()
     processed_since_restart = 0
@@ -446,7 +467,6 @@ def scrape_menus(input_file):
             print(f" ⏭️  Already scraped: {url}")
             skipped_data.append({"url": url, "reason": "already_scraped"})
             idx += 1
-            processed_since_restart += 1
             continue
         # ── end skip ──
 
@@ -477,24 +497,12 @@ def scrape_menus(input_file):
             except TimeoutException:
                 print(f" ⏭️  Skipped: page_did_not_load")
                 skipped_data.append({"url": url, "reason": "page_did_not_load"})
+                cleanup_between_pages(driver)
                 idx += 1
                 processed_since_restart += 1
                 continue
 
-            soup = BeautifulSoup(driver.page_source, "html.parser")
-
-            # Step 2: early no‑menu check
-            checkpoint("8. Checking no-menu state")
-            no_menu, no_menu_reason = has_no_menu(soup)
-            checkpoint("8. Checking no-menu state")
-            if no_menu:
-                print(f" ⏭️  Skipped: {no_menu_reason}")
-                skipped_data.append({"url": url, "reason": no_menu_reason})
-                idx += 1
-                processed_since_restart += 1
-                continue
-
-            # Step 3: wait for metadata widget
+            # Step 2: wait for metadata widget
             try:
                 checkpoint("10. Waiting for metadata")
                 WebDriverWait(driver, 10).until(
@@ -507,11 +515,25 @@ def scrape_menus(input_file):
             except TimeoutException:
                 print(f" ⏭️  Skipped: missing_metadata")
                 skipped_data.append({"url": url, "reason": "missing_metadata"})
+                cleanup_between_pages(driver)
                 idx += 1
                 processed_since_restart += 1
                 continue
 
+            # Single page_source for no-menu check + validation
             soup = BeautifulSoup(driver.page_source, "html.parser")
+
+            # Step 3: early no‑menu check
+            checkpoint("8. Checking no-menu state")
+            no_menu, no_menu_reason = has_no_menu(soup)
+            if no_menu:
+                print(f" ⏭️  Skipped: {no_menu_reason}")
+                skipped_data.append({"url": url, "reason": no_menu_reason})
+                del soup
+                cleanup_between_pages(driver)
+                idx += 1
+                processed_since_restart += 1
+                continue
 
             checkpoint("12. Validating restaurant")
             # Step 4: validate (rating, reviews, delivery‑only)
@@ -520,6 +542,18 @@ def scrape_menus(input_file):
             if not is_valid:
                 print(f" ⏭️  Skipped: {reason}")
                 skipped_data.append({**metadata, "reason": reason})
+                del soup
+                cleanup_between_pages(driver)
+                idx += 1
+                processed_since_restart += 1
+                continue
+
+            # Step 4b: skip if restaurant name already exists in menus file
+            if metadata.get("restaurant") in existing_names:
+                print(f" ⏭️  Already scraped (by name): {metadata['restaurant']}")
+                skipped_data.append({**metadata, "url": url, "reason": "already_scraped"})
+                del soup
+                cleanup_between_pages(driver)
                 idx += 1
                 processed_since_restart += 1
                 continue
@@ -534,13 +568,15 @@ def scrape_menus(input_file):
             except TimeoutException:
                 print(f" ⏭️  Skipped: menu_not_found")
                 skipped_data.append({**metadata, "reason": "menu_not_found"})
+                del soup
+                cleanup_between_pages(driver)
                 idx += 1
                 processed_since_restart += 1
                 continue
 
-            soup = BeautifulSoup(driver.page_source, "html.parser")
+            del soup
             checkpoint("16. Entering parse_menu()")
-            menu = parse_menu(soup, driver)   # note: parse_menu does not need 'url'
+            menu = parse_menu(driver)
             checkpoint(f"17. parse_menu() finished ({len(menu)} items)")
             estimated = calculate_estimated_price(menu)
             metadata["url"] = url
@@ -556,22 +592,24 @@ def scrape_menus(input_file):
 
             # ─── MODIFICATION: PERSIST TO DISK IMMEDIATELY ───
             current_file_menus = []
-            if os.path.exists(city_menus_file):
+            if os.path.exists(city_area_menus_file):
                 try:
-                    with open(city_menus_file, "r", encoding="utf-8") as f:
+                    with open(city_area_menus_file, "r", encoding="utf-8") as f:
                         current_file_menus = json.load(f)
                 except Exception:
                     current_file_menus = []
 
             current_file_menus.append(new_scraped_item)
-            
-            with open(city_menus_file, "w", encoding="utf-8") as f:
+
+            with open(city_area_menus_file, "w", encoding="utf-8") as f:
                 json.dump(current_file_menus, f, ensure_ascii=False, indent=2)
             print(f" 💾 Real-time save completed for: {metadata['restaurant']}")
 
-            # Dynamically update existing_urls so the script registers it as done
+            # Dynamically update tracking sets so the script registers it as done
             existing_urls.add(metadata.get("url"))
+            existing_names.add(metadata.get("restaurant"))
 
+            cleanup_between_pages(driver)
             time.sleep(1)
             idx += 1
             processed_since_restart += 1
@@ -600,11 +638,13 @@ def scrape_menus(input_file):
         except TimeoutException as te:
             print(f" ⏭️  Skipped: timeout ({te})")
             skipped_data.append({"url": url, "reason": "timeout", "error": str(te)})
+            cleanup_between_pages(driver)
             idx += 1
             processed_since_restart += 1
         except Exception as e:
             print(f" ❌ Failed: {e}")
             skipped_data.append({"url": url, "reason": "exception", "error": str(e)})
+            cleanup_between_pages(driver)
             idx += 1
             processed_since_restart += 1
 
@@ -624,7 +664,7 @@ def scrape_menus(input_file):
     # remove duplicates while preserving order
     unique_links = list(dict.fromkeys(google_maps_links))
 
-    gmaps_filename = f"{city}_restaurants_googleMaps.txt"
+    gmaps_filename = f"{city_area}_restaurants_googleMaps.txt"
     gmaps_path = os.path.join(RESTAURANTS_FOLDER, gmaps_filename)
     with open(gmaps_path, "w", encoding="utf-8") as f:
         f.write("\n".join(unique_links))
@@ -640,24 +680,24 @@ def scrape_menus(input_file):
 
     # ---- Append new committed data to the city menus file ----
     all_menus = existing_menus + committed_data
-    with open(city_menus_file, "w", encoding="utf-8") as f:
+    with open(city_area_menus_file, "w", encoding="utf-8") as f:
         json.dump(all_menus, f, ensure_ascii=False, indent=2)
-    print(f"✓ Saved {len(all_menus)} total menus to {city_menus_file}")
+    print(f"✓ Saved {len(all_menus)} total menus to {city_area_menus_file}")
 
     # Save skipped log per city (append)
-    city_skipped_file = os.path.join(MENUS_FOLDER, f"{city}_skipped.json")
+    city_area_skipped_file = os.path.join(MENUS_FOLDER, f"{city_area}_skipped.json")
     existing_skipped = []
-    if os.path.exists(city_skipped_file):
-        with open(city_skipped_file, "r", encoding="utf-8") as f:
+    if os.path.exists(city_area_skipped_file):
+        with open(city_area_skipped_file, "r", encoding="utf-8") as f:
             existing_skipped = json.load(f)
     all_skipped = existing_skipped + skipped_data
-    with open(city_skipped_file, "w", encoding="utf-8") as f:
+    with open(city_area_skipped_file, "w", encoding="utf-8") as f:
         json.dump(all_skipped, f, ensure_ascii=False, indent=2)
     if skipped_data:
-        print(f"Skipped {len(skipped_data)} restaurants, log saved to {city_skipped_file}")
+        print(f"Skipped {len(skipped_data)} restaurants, log saved to {city_area_skipped_file}")
         
     print(f"✓ Run complete. Total menus currently in file: {len(existing_menus) + len(committed_data)}")
-    return city_menus_file
+    return city_area_menus_file
 
 # ──────────────────────────────────────────────────────────────
 # Main entry point

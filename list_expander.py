@@ -150,7 +150,12 @@ def main():
         print(f"{'#'*60}")
 
         for area in areas:
-            area_file = scrape_city_area(city, area)
+            area_file = os.path.join(RESTAURANTS_FOLDER, f"{city}_{area}_restaurants.json")
+            if os.path.exists(area_file):
+                print(f"  Restaurant list already exists: {area_file}, skipping expansion.")
+            else:
+                area_file = scrape_city_area(city, area)
+
             if os.path.exists(area_file):
                 print(f"\n  SCRAPING MENUS FOR: {city} / {area}")
                 scrape_menus(area_file)
