@@ -464,7 +464,6 @@ def scrape_menus(input_file):
 
         # ── NEW: skip if already scraped ──
         if url in existing_urls:
-            print(f" ⏭️  Already scraped: {url}")
             skipped_data.append({"url": url, "reason": "already_scraped"})
             idx += 1
             continue
@@ -495,7 +494,6 @@ def scrape_menus(input_file):
                 )
                 checkpoint("4. Body found")
             except TimeoutException:
-                print(f" ⏭️  Skipped: page_did_not_load")
                 skipped_data.append({"url": url, "reason": "page_did_not_load"})
                 cleanup_between_pages(driver)
                 idx += 1
@@ -513,7 +511,6 @@ def scrape_menus(input_file):
                 )
                 checkpoint("11. Metadata loaded")
             except TimeoutException:
-                print(f" ⏭️  Skipped: missing_metadata")
                 skipped_data.append({"url": url, "reason": "missing_metadata"})
                 cleanup_between_pages(driver)
                 idx += 1
@@ -527,7 +524,6 @@ def scrape_menus(input_file):
             checkpoint("8. Checking no-menu state")
             no_menu, no_menu_reason = has_no_menu(soup)
             if no_menu:
-                print(f" ⏭️  Skipped: {no_menu_reason}")
                 skipped_data.append({"url": url, "reason": no_menu_reason})
                 del soup
                 cleanup_between_pages(driver)
@@ -540,7 +536,6 @@ def scrape_menus(input_file):
             is_valid, reason, metadata = validate_restaurant(soup, url)
             checkpoint(f"13. Validation finished ({is_valid})")
             if not is_valid:
-                print(f" ⏭️  Skipped: {reason}")
                 skipped_data.append({**metadata, "reason": reason})
                 del soup
                 cleanup_between_pages(driver)
@@ -550,7 +545,6 @@ def scrape_menus(input_file):
 
             # Step 4b: skip if restaurant name already exists in menus file
             if metadata.get("restaurant") in existing_names:
-                print(f" ⏭️  Already scraped (by name): {metadata['restaurant']}")
                 skipped_data.append({**metadata, "url": url, "reason": "already_scraped"})
                 del soup
                 cleanup_between_pages(driver)
@@ -566,7 +560,6 @@ def scrape_menus(input_file):
                 )
                 checkpoint("15. Menu appeared")
             except TimeoutException:
-                print(f" ⏭️  Skipped: menu_not_found")
                 skipped_data.append({**metadata, "reason": "menu_not_found"})
                 del soup
                 cleanup_between_pages(driver)
